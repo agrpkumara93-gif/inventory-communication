@@ -17,7 +17,7 @@ $flashes = get_flashes();
 <?php if ($user): ?>
 <nav class="navbar navbar-expand-lg navbar-dark bg-primary shadow-sm">
     <div class="container-fluid">
-        <a class="navbar-brand fw-semibold" href="<?= is_admin() ? 'dashboard.php' : 'sales.php' ?>">Stationery Shop</a>
+        <a class="navbar-brand fw-semibold" href="<?= is_admin() ? 'dashboard.php' : 'sales.php' ?>">Luma Bookshop and Communication</a>
         <button class="navbar-toggler" type="button" data-bs-toggle="collapse" data-bs-target="#mainNav">
             <span class="navbar-toggler-icon"></span>
         </button>
