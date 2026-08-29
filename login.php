@@ -44,7 +44,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 <div class="login-wrap p-3">
     <div class="card login-card p-4">
         <div class="card-body">
-            <h2 class="mb-1">Stationery Inventory</h2>
+            <h2 class="mb-1"> Luma Communication</h2>
             <p class="text-muted mb-4">Sign in to continue</p>
 
             <?php if ($error): ?>
