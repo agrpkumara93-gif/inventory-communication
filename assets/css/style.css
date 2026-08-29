@@ -1,0 +1,47 @@
+body {
+    background: #f6f8fb;
+}
+
+.card {
+    border: 0;
+    box-shadow: 0 0.125rem 0.5rem rgba(0, 0, 0, 0.06);
+}
+
+.table thead th {
+    white-space: nowrap;
+}
+
+.stat-card .stat-value {
+    font-size: 1.75rem;
+    font-weight: 700;
+}
+
+.login-wrap {
+    min-height: 100vh;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background: linear-gradient(135deg, #f8fafc, #e9f2ff);
+}
+
+.login-card {
+    width: 100%;
+    max-width: 420px;
+}
+
+@media print {
+    .no-print,
+    nav,
+    .alert {
+        display: none !important;
+    }
+
+    body {
+        background: #fff;
+    }
+
+    .invoice-card {
+        box-shadow: none !important;
+        border: 0 !important;
+    }
+}
