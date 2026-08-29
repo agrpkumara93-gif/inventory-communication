@@ -36,7 +36,7 @@ require __DIR__ . '/includes/header.php';
         <div class="card invoice-card">
             <div class="card-body p-4 p-md-5">
                 <div class="d-flex justify-content-between align-items-start mb-4">
-                    <div><h2 class="mb-1">Luma Book Shop & Communication</h2><div class="text-muted">Sales Invoice</div></div>
+                    <div><h2 class="mb-1">Luma Book Shop</h2><div class="text-muted">Elapatha, Rathnapura</div></div>
                     <div class="text-end"><strong><?= e($sale['invoice_no']) ?></strong><br><small><?= e(date('d M Y H:i', strtotime($sale['sale_date']))) ?></small></div>
                 </div>
                 <div class="row mb-4">
