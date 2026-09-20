@@ -36,7 +36,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 <head>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
-    <title>Login - Luma Bookshop & Communication</title>
+    <title>Login - Stationery Inventory</title>
     <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet">
     <link rel="stylesheet" href="assets/css/style.css">
 </head>
@@ -44,7 +44,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 <div class="login-wrap p-3">
     <div class="card login-card p-4">
         <div class="card-body">
-            <h2 class="mb-1"> Luma Communication</h2>
+            <h2 class="mb-1">Stationery Inventory</h2>
             <p class="text-muted mb-4">Sign in to continue</p>
 
             <?php if ($error): ?>

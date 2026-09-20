@@ -174,7 +174,34 @@ require __DIR__ . '/includes/header.php';
                             <?php $selected = array_values(array_filter($items, fn($x) => (int) $x['item_id'] === (int) $editReceipt['item_id'])); ?>
                             <input class="form-control" value="<?= e(($selected[0]['item_code'] ?? '') . ' - ' . ($selected[0]['item_name'] ?? '')) ?>" disabled>
                         <?php else: ?>
-                            <select class="form-select" name="item_id" required><option value="">Select item</option><?php foreach ($items as $item): ?><option value="<?= (int) $item['item_id'] ?>"><?= e($item['item_code'] . ' - ' . $item['item_name']) ?></option><?php endforeach; ?></select>
+                            <div class="live-search" id="receivable_item_search">
+                                <input
+                                    type="text"
+                                    class="form-control live-search-input"
+                                    placeholder="Type item code or item name..."
+                                    autocomplete="off"
+                                    aria-label="Search item"
+                                    required
+                                >
+                                <input type="hidden" class="live-search-value" name="item_id" value="">
+                                <div class="live-search-menu" role="listbox">
+                                    <?php foreach ($items as $item): ?>
+                                        <?php $itemLabel = $item['item_code'] . ' - ' . $item['item_name']; ?>
+                                        <button
+                                            type="button"
+                                            class="live-search-option"
+                                            data-value="<?= (int) $item['item_id'] ?>"
+                                            data-label="<?= e($itemLabel) ?>"
+                                            data-search="<?= e($item['item_code'] . ' ' . $item['item_name']) ?>"
+                                        >
+                                            <strong><?= e($item['item_code']) ?></strong>
+                                            <span class="text-muted"> - <?= e($item['item_name']) ?></span>
+                                        </button>
+                                    <?php endforeach; ?>
+                                    <div class="live-search-empty d-none">No matching item found.</div>
+                                </div>
+                            </div>
+                            <div class="form-text">Search by item code or item name.</div>
                         <?php endif; ?>
                     </div>
                     <div class="mb-3"><label class="form-label">Received Quantity</label><input type="number" min="1" class="form-control" name="received_quantity" value="<?= e((string) ($editReceipt['received_quantity'] ?? '')) ?>" required></div>

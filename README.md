@@ -78,3 +78,14 @@ The dashboard number is **gross merchandise profit/loss**, not accounting net pr
 `SUM(selling amount - cost of goods sold)` for the current calendar month.
 
 It does not subtract rent, salaries, electricity, tax, transport, bank charges or other operating expenses.
+
+## V4 live search update
+- Item Receivables now uses a live-search item box instead of a select dropdown.
+- Sales & Billing now uses a live-search Item / Price Batch box instead of a select dropdown.
+- Sales search selection automatically loads the selected batch selling price and available stock.
+- Search supports item code and item name; Sales also matches batch number and price.
+
+
+## V5 - Sales price grouping
+
+Sales search now shows one option per item + selling price. If multiple inventory batches have the same item and same selling price, they are combined and their remaining quantities are summed. Checkout allocates stock FIFO across the matching physical batches while retaining each batch's actual unit cost for gross-profit reporting. No database migration is required from V3/V4.

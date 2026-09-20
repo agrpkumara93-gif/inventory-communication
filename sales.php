@@ -6,9 +6,9 @@ $pdo = db();
 if (!isset($_SESSION['cart']) || !is_array($_SESSION['cart'])) {
     $_SESSION['cart'] = [];
 }
-// v2 carts were keyed by item_id and had no batch_id. Discard them after upgrade.
+// Older carts selected a physical batch. V5 carts select an item + selling-price group.
 foreach ($_SESSION['cart'] as $oldLine) {
-    if (!isset($oldLine['batch_id'])) {
+    if (!isset($oldLine['price_group_key'])) {
         $_SESSION['cart'] = [];
         break;
     }
@@ -20,42 +20,49 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 
     try {
         if ($action === 'add_to_cart') {
-            $batchId = (int) ($_POST['batch_id'] ?? 0);
+            $priceGroup = trim($_POST['price_group'] ?? '');
             $qty = (int) ($_POST['qty'] ?? 0);
-            if ($batchId <= 0 || $qty <= 0) {
-                throw new RuntimeException('Select an item batch and enter a valid quantity.');
+            [$itemIdRaw, $salePriceRaw] = array_pad(explode('|', $priceGroup, 2), 2, '');
+            $itemId = (int) $itemIdRaw;
+            $salePrice = number_format((float) $salePriceRaw, 2, '.', '');
+
+            if ($itemId <= 0 || $qty <= 0 || $salePriceRaw === '' || (float) $salePrice < 0) {
+                throw new RuntimeException('Select an item / selling price and enter a valid quantity.');
             }
 
-            // Price and cost always come from the database; browser values are display-only.
+            // Treat all open batches for the same item + selling price as one sellable price group.
             $stmt = $pdo->prepare(
-                'SELECT ib.batch_id, ib.item_id, ib.qty_remaining, ib.unit_cost, ib.sale_price,
+                'SELECT ib.item_id, ib.sale_price, SUM(ib.qty_remaining) AS total_qty,
                         mi.item_code, mi.item_name
                  FROM inventory_batch ib
                  JOIN master_item mi ON mi.item_id = ib.item_id
-                 WHERE ib.batch_id = ? AND ib.qty_remaining > 0 AND mi.is_active = 1'
+                 WHERE ib.item_id = ? AND ib.sale_price = ?
+                   AND ib.qty_remaining > 0 AND mi.is_active = 1
+                 GROUP BY ib.item_id, ib.sale_price, mi.item_code, mi.item_name'
             );
-            $stmt->execute([$batchId]);
-            $batch = $stmt->fetch();
-            if (!$batch) throw new RuntimeException('Selected stock batch is not available.');
+            $stmt->execute([$itemId, $salePrice]);
+            $group = $stmt->fetch();
+            if (!$group) throw new RuntimeException('Selected item / selling price is not available.');
 
-            $existingQty = (int) ($_SESSION['cart'][$batchId]['qty'] ?? 0);
-            if ($existingQty + $qty > (int) $batch['qty_remaining']) {
-                throw new RuntimeException('Not enough stock in this price batch. Available: ' . (int) $batch['qty_remaining'] . '.');
+            $groupKey = $itemId . '|' . number_format((float) $group['sale_price'], 2, '.', '');
+            $existingQty = (int) ($_SESSION['cart'][$groupKey]['qty'] ?? 0);
+            $availableQty = (int) $group['total_qty'];
+            if ($existingQty + $qty > $availableQty) {
+                throw new RuntimeException('Not enough stock at this selling price. Available: ' . $availableQty . '.');
             }
 
-            $_SESSION['cart'][$batchId] = [
-                'batch_id' => $batchId,
-                'item_id' => (int) $batch['item_id'],
-                'item_code' => $batch['item_code'],
-                'item_name' => $batch['item_name'],
+            $_SESSION['cart'][$groupKey] = [
+                'price_group_key' => $groupKey,
+                'item_id' => (int) $group['item_id'],
+                'item_code' => $group['item_code'],
+                'item_name' => $group['item_name'],
                 'qty' => $existingQty + $qty,
-                'unit_price' => (float) $batch['sale_price'],
-                'cost_unit_price' => (float) $batch['unit_cost'],
+                'unit_price' => (float) $group['sale_price'],
             ];
-            flash('success', 'Item added to bill at the batch selling price.');
+            flash('success', 'Item added to bill at the selected selling price.');
         } elseif ($action === 'remove') {
-            $batchId = (int) ($_POST['batch_id'] ?? 0);
-            unset($_SESSION['cart'][$batchId]);
+            $groupKey = trim($_POST['price_group_key'] ?? '');
+            unset($_SESSION['cart'][$groupKey]);
             flash('success', 'Item removed from bill.');
         } elseif ($action === 'clear') {
             $_SESSION['cart'] = [];
@@ -68,41 +75,55 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             $validatedLines = [];
             $total = 0.0;
 
-            // Lock and re-read every batch. This prevents overselling and price tampering.
+            // Lock all matching physical batches. FIFO allocation keeps the real batch cost for profit reporting.
             $batchStmt = $pdo->prepare(
                 'SELECT ib.batch_id, ib.item_id, ib.qty_remaining, ib.unit_cost, ib.sale_price,
-                        mi.item_code, mi.item_name
+                        ib.received_date, mi.item_code, mi.item_name
                  FROM inventory_batch ib
                  JOIN master_item mi ON mi.item_id = ib.item_id
-                 WHERE ib.batch_id = ? AND mi.is_active = 1
+                 WHERE ib.item_id = ? AND ib.sale_price = ?
+                   AND ib.qty_remaining > 0 AND mi.is_active = 1
+                 ORDER BY ib.received_date ASC, ib.batch_id ASC
                  FOR UPDATE'
             );
 
             foreach ($_SESSION['cart'] as $line) {
-                $batchStmt->execute([(int) $line['batch_id']]);
-                $batch = $batchStmt->fetch();
-                if (!$batch || (int) $batch['qty_remaining'] < (int) $line['qty']) {
-                    throw new RuntimeException('Insufficient stock for ' . $line['item_name'] . ' in batch #' . (int) $line['batch_id'] . '.');
+                $itemId = (int) $line['item_id'];
+                $requestedQty = (int) $line['qty'];
+                $sellPrice = number_format((float) $line['unit_price'], 2, '.', '');
+
+                $batchStmt->execute([$itemId, $sellPrice]);
+                $matchingBatches = $batchStmt->fetchAll();
+                $availableQty = array_sum(array_map(static fn($b) => (int) $b['qty_remaining'], $matchingBatches));
+                if ($availableQty < $requestedQty) {
+                    throw new RuntimeException('Insufficient stock for ' . $line['item_name'] . ' at ' . money($sellPrice) . '. Available: ' . $availableQty . '.');
                 }
 
-                $qty = (int) $line['qty'];
-                $sellPrice = (float) $batch['sale_price'];
-                $unitCost = (float) $batch['unit_cost'];
-                $lineTotal = $qty * $sellPrice;
-                $costTotal = $qty * $unitCost;
-                $total += $lineTotal;
+                $remainingToAllocate = $requestedQty;
+                foreach ($matchingBatches as $batch) {
+                    if ($remainingToAllocate <= 0) break;
+                    $takeQty = min($remainingToAllocate, (int) $batch['qty_remaining']);
+                    if ($takeQty <= 0) continue;
 
-                $validatedLines[] = [
-                    'batch_id' => (int) $batch['batch_id'],
-                    'item_id' => (int) $batch['item_id'],
-                    'item_code' => $batch['item_code'],
-                    'item_name' => $batch['item_name'],
-                    'qty' => $qty,
-                    'unit_price' => $sellPrice,
-                    'cost_unit_price' => $unitCost,
-                    'line_total' => $lineTotal,
-                    'cost_total' => $costTotal,
-                ];
+                    $actualSellPrice = (float) $batch['sale_price'];
+                    $unitCost = (float) $batch['unit_cost'];
+                    $lineTotal = $takeQty * $actualSellPrice;
+                    $costTotal = $takeQty * $unitCost;
+                    $total += $lineTotal;
+
+                    $validatedLines[] = [
+                        'batch_id' => (int) $batch['batch_id'],
+                        'item_id' => (int) $batch['item_id'],
+                        'item_code' => $batch['item_code'],
+                        'item_name' => $batch['item_name'],
+                        'qty' => $takeQty,
+                        'unit_price' => $actualSellPrice,
+                        'cost_unit_price' => $unitCost,
+                        'line_total' => $lineTotal,
+                        'cost_total' => $costTotal,
+                    ];
+                    $remainingToAllocate -= $takeQty;
+                }
             }
 
             $stmt = $pdo->prepare('INSERT INTO sales_master (invoice_no, sale_date, sold_by, customer_name, total_amount) VALUES (NULL, NOW(), ?, ?, ?)');
@@ -150,13 +171,17 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     redirect('sales.php');
 }
 
-$batches = $pdo->query(
-    'SELECT ib.batch_id, ib.item_id, ib.qty_remaining, ib.unit_cost, ib.sale_price, ib.received_date,
+$priceGroups = $pdo->query(
+    'SELECT ib.item_id, ib.sale_price,
+            SUM(ib.qty_remaining) AS total_qty,
+            COUNT(*) AS batch_count,
+            MIN(ib.received_date) AS oldest_received_date,
             mi.item_code, mi.item_name
      FROM inventory_batch ib
      JOIN master_item mi ON mi.item_id = ib.item_id
      WHERE mi.is_active = 1 AND ib.qty_remaining > 0
-     ORDER BY mi.item_name, ib.received_date, ib.batch_id'
+     GROUP BY ib.item_id, ib.sale_price, mi.item_code, mi.item_name
+     ORDER BY mi.item_name, ib.sale_price'
 )->fetchAll();
 
 $cart = $_SESSION['cart'];
@@ -181,29 +206,62 @@ require __DIR__ . '/includes/header.php';
                     <input type="hidden" name="csrf_token" value="<?= e(csrf_token()) ?>">
                     <input type="hidden" name="action" value="add_to_cart">
                     <div class="mb-3">
-                        <label class="form-label">Item / Price Batch</label>
-                        <select class="form-select" name="batch_id" id="sale_batch_id" onchange="loadBatchPrice()" required>
-                            <option value="">Select item</option>
-                            <?php foreach ($batches as $batch): ?>
-                                <option
-                                    value="<?= (int) $batch['batch_id'] ?>"
-                                    data-price="<?= e(number_format((float) $batch['sale_price'], 2, '.', '')) ?>"
-                                    data-stock="<?= (int) $batch['qty_remaining'] ?>"
-                                ><?= e($batch['item_code'] . ' - ' . $batch['item_name'] . ' | Batch #' . $batch['batch_id'] . ' | Stock: ' . $batch['qty_remaining'] . ' | ' . money($batch['sale_price'])) ?></option>
-                            <?php endforeach; ?>
-                        </select>
-                        <div class="form-text">The same item may appear more than once when stock exists at different selling prices.</div>
+                        <label class="form-label">Item / Selling Price</label>
+                        <div
+                            class="live-search"
+                            id="sale_price_search"
+                            data-price-target="sale_unit_price"
+                            data-qty-target="sale_qty"
+                            data-stock-hint-target="sale_stock_hint"
+                            data-stock-label="Available at this price"
+                        >
+                            <input
+                                type="text"
+                                class="form-control live-search-input"
+                                placeholder="Type item code or item name..."
+                                autocomplete="off"
+                                aria-label="Search item or selling price"
+                                required
+                            >
+                            <input type="hidden" class="live-search-value" name="price_group" value="">
+                            <div class="live-search-menu" role="listbox">
+                                <?php foreach ($priceGroups as $group): ?>
+                                    <?php
+                                        $priceValue = number_format((float) $group['sale_price'], 2, '.', '');
+                                        $groupValue = (int) $group['item_id'] . '|' . $priceValue;
+                                        $groupLabel = $group['item_code'] . ' - ' . $group['item_name'] . ' | ' . money($group['sale_price']);
+                                    ?>
+                                    <button
+                                        type="button"
+                                        class="live-search-option"
+                                        data-value="<?= e($groupValue) ?>"
+                                        data-label="<?= e($groupLabel) ?>"
+                                        data-search="<?= e($group['item_code'] . ' ' . $group['item_name'] . ' ' . $priceValue) ?>"
+                                        data-price="<?= e($priceValue) ?>"
+                                        data-stock="<?= (int) $group['total_qty'] ?>"
+                                    >
+                                        <div class="d-flex justify-content-between gap-2">
+                                            <span><strong><?= e($group['item_code']) ?></strong> - <?= e($group['item_name']) ?></span>
+                                            <strong><?= e(money($group['sale_price'])) ?></strong>
+                                        </div>
+                                        <small class="text-muted">Total stock: <?= (int) $group['total_qty'] ?><?php if ((int) $group['batch_count'] > 1): ?> · <?= (int) $group['batch_count'] ?> batches combined<?php endif; ?></small>
+                                    </button>
+                                <?php endforeach; ?>
+                                <div class="live-search-empty d-none">No matching item / selling price found.</div>
+                            </div>
+                        </div>
+                        <div class="form-text">Same item batches with the same selling price are combined into one option.</div>
                     </div>
                     <div class="row g-3">
                         <div class="col-5">
                             <label class="form-label">Qty</label>
                             <input type="number" name="qty" id="sale_qty" min="1" value="1" class="form-control" required>
-                            <div class="form-text" id="sale_stock_hint">Select a batch.</div>
+                            <div class="form-text" id="sale_stock_hint">Select an item / selling price.</div>
                         </div>
                         <div class="col-7">
                             <label class="form-label">Sale Price (LKR)</label>
                             <input type="text" id="sale_unit_price" class="form-control" value="" readonly>
-                            <div class="form-text">Loaded automatically from the selected stock batch.</div>
+                            <div class="form-text">Loaded automatically from the selected selling-price group.</div>
                         </div>
                     </div>
                     <button class="btn btn-primary mt-3" type="submit">Add to Bill</button>
@@ -236,21 +294,20 @@ require __DIR__ . '/includes/header.php';
             <div class="card-body p-0">
                 <div class="table-responsive">
                     <table class="table align-middle mb-0">
-                        <thead class="table-light"><tr><th>Item</th><th>Batch</th><th class="text-end">Qty</th><th class="text-end">Unit Price</th><th class="text-end">Total</th><th></th></tr></thead>
+                        <thead class="table-light"><tr><th>Item</th><th class="text-end">Qty</th><th class="text-end">Unit Price</th><th class="text-end">Total</th><th></th></tr></thead>
                         <tbody>
                         <?php foreach ($cart as $line): $lineTotal = (int) $line['qty'] * (float) $line['unit_price']; ?>
                             <tr>
                                 <td><strong><?= e($line['item_name']) ?></strong><br><small class="text-muted"><?= e($line['item_code']) ?></small></td>
-                                <td>#<?= (int) $line['batch_id'] ?></td>
                                 <td class="text-end"><?= (int) $line['qty'] ?></td>
                                 <td class="text-end"><?= e(money($line['unit_price'])) ?></td>
                                 <td class="text-end"><?= e(money($lineTotal)) ?></td>
-                                <td class="text-end"><form method="post"><input type="hidden" name="csrf_token" value="<?= e(csrf_token()) ?>"><input type="hidden" name="action" value="remove"><input type="hidden" name="batch_id" value="<?= (int) $line['batch_id'] ?>"><button class="btn btn-sm btn-outline-danger">Remove</button></form></td>
+                                <td class="text-end"><form method="post"><input type="hidden" name="csrf_token" value="<?= e(csrf_token()) ?>"><input type="hidden" name="action" value="remove"><input type="hidden" name="price_group_key" value="<?= e($line['price_group_key']) ?>"><button class="btn btn-sm btn-outline-danger">Remove</button></form></td>
                             </tr>
                         <?php endforeach; ?>
-                        <?php if (!$cart): ?><tr><td colspan="6" class="text-center text-muted py-5">Add items to start a bill.</td></tr><?php endif; ?>
+                        <?php if (!$cart): ?><tr><td colspan="5" class="text-center text-muted py-5">Add items to start a bill.</td></tr><?php endif; ?>
                         </tbody>
-                        <?php if ($cart): ?><tfoot><tr class="table-light"><th colspan="4" class="text-end">Grand Total</th><th class="text-end fs-5"><?= e(money($cartTotal)) ?></th><th></th></tr></tfoot><?php endif; ?>
+                        <?php if ($cart): ?><tfoot><tr class="table-light"><th colspan="3" class="text-end">Grand Total</th><th class="text-end fs-5"><?= e(money($cartTotal)) ?></th><th></th></tr></tfoot><?php endif; ?>
                     </table>
                 </div>
             </div>
@@ -267,30 +324,5 @@ require __DIR__ . '/includes/header.php';
         </div>
     </div>
 </div>
-<script>
-function loadBatchPrice() {
-    const select = document.getElementById('sale_batch_id');
-    const price = document.getElementById('sale_unit_price');
-    const qty = document.getElementById('sale_qty');
-    const hint = document.getElementById('sale_stock_hint');
-    if (!select || !price || !qty || !hint) return;
 
-    const option = select.options[select.selectedIndex];
-    if (!option || !option.value) {
-        price.value = '';
-        qty.removeAttribute('max');
-        hint.textContent = 'Select a batch.';
-        return;
-    }
-
-    const batchPrice = option.getAttribute('data-price') || '';
-    const stock = option.getAttribute('data-stock') || '0';
-    price.value = batchPrice;
-    qty.max = stock;
-    if (parseInt(qty.value || '1', 10) > parseInt(stock, 10)) qty.value = stock;
-    hint.textContent = 'Available in this batch: ' + stock;
-}
-
-document.addEventListener('DOMContentLoaded', loadBatchPrice);
-</script>
 <?php require __DIR__ . '/includes/footer.php'; ?>
